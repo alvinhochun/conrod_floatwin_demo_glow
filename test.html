@@ -1,0 +1,56 @@
+<!doctype html>
+<html>
+
+<head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>conrod_floatwin demo</title>
+    <style>
+        html, body {
+            margin: 0;
+            padding: 0;
+            height: 100%;
+            touch-action: manipulation;
+        }
+        #root {
+            width: 100%;
+            height: 100%;
+            display: flex;
+            flex-direction: column;
+        }
+        #nav {
+            flex-shrink: 1;
+            margin: 2px 6px;
+            display: flex;
+            flex-direction: row;
+            flex-wrap: wrap;
+        }
+        #container {
+            width: 100%;
+            height: 100%;
+            flex-grow: 1;
+            position: relative;
+            touch-action: none;
+        }
+    </style>
+</head>
+
+<body>
+    <div id="root">
+        <nav id="nav">
+            <span style="flex: 1 1 auto;"><a href="https://github.com/alvinhochun/conrod_floatwin">conrod_floatwin</a>
+                demo</span>
+            <span style="flex: 0 1 auto;">Press <kbd>F11</kbd> when focused in the canvas to go fullscreen.</span>
+        </nav>
+        <div id="container">
+            <canvas id="canvas"></canvas>
+        </div>
+    </div>
+
+    <script type="module">
+        import init from "./pkg/conrod_floatwin_demo_glow.js";
+        init("./pkg/conrod_floatwin_demo_glow_bg.wasm");
+    </script>
+</body>
+
+</html>

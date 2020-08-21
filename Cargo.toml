@@ -1,0 +1,35 @@
+[package]
+name = "conrod_floatwin_demo_glow"
+version = "0.0.1"
+authors = ["Alvin Wong <alvinhochun@gmail.com>"]
+edition = "2018"
+publish = false
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+conrod_core = "0.70"
+conrod_example_shared = "0.70"
+conrod_floatwin = { git = "https://github.com/alvinhochun/conrod_floatwin.git", rev = "8644aed985182b03d87593d8df26a5abb73528d0" }
+conrod_winit = "0.70"
+find_folder = "0.3.0"
+glow = "0.5"
+image = "0.22"
+winit = "0.22"
+
+[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+glutin = "0.24"
+
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+console_error_panic_hook = "0.1.5"
+getrandom = { version = "*", features = ["wasm-bindgen"]}
+wasm-bindgen = { version = "0.2" }
+web-sys = { version = "0.3", features = ["HtmlCanvasElement", "WebGl2RenderingContext", "Window"]}
+winit = { version = "0.22", features = ["web-sys"]}
+
+[patch.crates-io]
+conrod_core = { version = "0.70", git = "https://github.com/alvinhochun/conrod.git", branch = "custom" }
+conrod_example_shared = { version = "0.70", git = "https://github.com/alvinhochun/conrod.git", branch = "custom" }
+conrod_winit = { version = "0.70", git = "https://github.com/alvinhochun/conrod.git", branch = "custom" }
+winit = { version = "0.22", git = "https://github.com/alvinhochun/winit.git", branch = "custom" }
