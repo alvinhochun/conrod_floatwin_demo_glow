@@ -11,15 +11,6 @@ pub struct GlRect {
     height: u32,
 }
 
-/// A `Command` describing a step in the drawing process.
-#[derive(Clone, Debug)]
-pub enum Command<'a> {
-    /// Draw to the target.
-    Draw(Draw<'a>),
-    /// Update the scissor rect.
-    Scizzor(GlRect),
-}
-
 /// A `Command` for drawing to the target.
 ///
 /// Each variant describes how to draw the contents of the vertex buffer.
@@ -53,12 +44,6 @@ pub struct Renderer {
     glyph_cache: GlyphCache,
     commands: Vec<PreparedCommand>,
     vertices: Vec<Vertex>,
-}
-
-/// An iterator yielding `Command`s, produced by the `Renderer::commands` method.
-pub struct Commands<'a> {
-    commands: std::slice::Iter<'a, PreparedCommand>,
-    vertices: &'a [Vertex],
 }
 
 pub struct Texture {
@@ -493,6 +478,10 @@ impl Display for (u32, u32, f64) {
 }
 
 impl Renderer {
+    // // This is almost 1MiB of buffer (29127 * 36 = 1048572)
+    // const VBO_BUFFER_VERTEX_COUNT: usize = 29_127;
+    const VBO_BUFFER_VERTEX_COUNT: usize = 10_000;
+
     /// Construct a new empty `Renderer`.
     ///
     /// The dimensions of the inner glyph cache will be equal to the dimensions of the given
@@ -561,6 +550,11 @@ impl Renderer {
                 stride,
                 5 * 4,
             );
+            gl.buffer_data_size(
+                glow::ARRAY_BUFFER,
+                (Self::VBO_BUFFER_VERTEX_COUNT * std::mem::size_of::<Vertex>()) as i32,
+                glow::STREAM_DRAW,
+            );
         }
         Ok(Renderer {
             program,
@@ -570,19 +564,6 @@ impl Renderer {
             commands: Vec::new(),
             vertices: Vec::new(),
         })
-    }
-
-    /// Produce an `Iterator` yielding `Command`s.
-    pub fn commands(&self) -> Commands {
-        let Renderer {
-            ref commands,
-            ref vertices,
-            ..
-        } = *self;
-        Commands {
-            commands: commands.iter(),
-            vertices: vertices,
-        }
     }
 
     /// Fill the inner vertex and command buffers by translating the given `primitives`.
@@ -973,90 +954,156 @@ impl Renderer {
     pub fn draw(&self, gl: &glow::Context, image_map: &image::Map<Texture>) -> Result<(), String> {
         macro_rules! verify {
             () => {{
-                let err = gl.get_error();
+                verify!(gl)
+            }};
+            ($gl:expr) => {{
+                let err = $gl.get_error();
                 if err != 0 {
                     panic!("gl error {}", err);
                 }
             }};
         }
-        unsafe fn to_raw_bytes<T>(src: &[T]) -> &[u8] {
+        unsafe fn as_raw_bytes<T>(src: &[T]) -> &[u8] {
             std::slice::from_raw_parts(
                 src.as_ptr() as *const u8,
                 src.len() * std::mem::size_of::<T>(),
             )
         }
 
+        /// Upload as much vertices as possible in a batch instead of uploading
+        /// individual batches for every command. Since the VBO was allocated
+        /// in advance, there is a chance there isn't enough space for all
+        /// vertices. This function returns a range of all the vertices which
+        /// had been uploaded.
+        unsafe fn upload_vbo(
+            gl: &glow::Context,
+            vertices: &[Vertex],
+            batch_start_offset: usize,
+        ) -> std::ops::Range<usize> {
+            let next_unbatched_vertex_idx = vertices
+                .len()
+                .min(batch_start_offset + Renderer::VBO_BUFFER_VERTEX_COUNT);
+            let current_range = batch_start_offset..next_unbatched_vertex_idx;
+            let x = as_raw_bytes(&vertices[current_range.clone()]);
+            gl.buffer_sub_data_u8_slice(glow::ARRAY_BUFFER, 0, x);
+            verify!(gl);
+            current_range
+        }
+
         let glyph_texture = *self.glyph_cache.texture();
 
         const NUM_VERTICES_IN_TRIANGLE: usize = 3;
 
+        let mut has_scissor = false;
+        let mut current_uploaded;
+
         unsafe {
-            gl.disable(glow::SCISSOR_TEST);
-            verify!();
             gl.use_program(Some(self.program.program));
             verify!();
             gl.bind_buffer(glow::ARRAY_BUFFER, Some(self.vbo));
             verify!();
             gl.bind_vertex_array(Some(self.vao));
             verify!();
+            // Upload as much vertices as possible. If there isn't enough space
+            // for all vertices, it will be handled later in the code.
+            current_uploaded = upload_vbo(gl, &self.vertices, 0);
         }
 
-        for command in self.commands() {
+        for command in &self.commands {
             match command {
                 // Update the `scizzor` before continuing to draw.
-                Command::Scizzor(scizzor) => {
-                    unsafe {
+                PreparedCommand::Scizzor(scizzor) => unsafe {
+                    if !has_scissor {
+                        has_scissor = true;
                         gl.enable(glow::SCISSOR_TEST);
                         verify!();
-                        gl.scissor(
-                            scizzor.left as i32,
-                            scizzor.bottom as i32,
-                            scizzor.width as i32,
-                            scizzor.height as i32,
-                        );
                     }
-                }
+                    gl.scissor(
+                        scizzor.left as i32,
+                        scizzor.bottom as i32,
+                        scizzor.width as i32,
+                        scizzor.height as i32,
+                    );
+                },
 
                 // Draw to the target with the given `draw` command.
-                Command::Draw(draw) => match draw {
-                    // Draw text and plain 2D geometry.
-                    //
-                    // Only submit the vertices if there is enough for at least one triangle.
-                    Draw::Plain(slice) => {
-                        if slice.len() >= NUM_VERTICES_IN_TRIANGLE {
-                            unsafe {
-                                gl.bind_texture(glow::TEXTURE_2D, Some(glyph_texture));
-                                verify!();
-                                let x = to_raw_bytes(slice);
-                                gl.buffer_data_u8_slice(glow::ARRAY_BUFFER, x, glow::DYNAMIC_DRAW);
-                                verify!();
-                                gl.draw_arrays(glow::TRIANGLES, 0, slice.len() as i32);
-                                verify!();
-                            }
+                PreparedCommand::Plain(range) | PreparedCommand::Image(_, range) => unsafe {
+                    /// Draw a batch of triangles from those currently uploaded
+                    /// to the VBO. Returns a range of the vertices actually
+                    /// drawn.
+                    ///
+                    /// This expects that `draw_range.start >= current_uploaded.start`
+                    /// and if this is violated you will trigger an underflow
+                    /// and an overflow and the OpenGL call will be accessing
+                    /// invalid memory.
+                    unsafe fn draw_available_batch(
+                        gl: &glow::Context,
+                        current_uploaded: &std::ops::Range<usize>,
+                        draw_range: std::ops::Range<usize>,
+                    ) -> std::ops::Range<usize> {
+                        let batched = {
+                            let batched =
+                                draw_range.start..draw_range.end.min(current_uploaded.end);
+                            // We always draw triangles. If the vertices for the
+                            // current command aren't all in the VBO, the rest
+                            // has to be split into another draw. We need to make
+                            // sure that all the vertices of the last triangle
+                            // are not split across multiple draw calls as this
+                            // will result in broken geometry.
+                            let rem = batched.len() % NUM_VERTICES_IN_TRIANGLE;
+                            batched.start..batched.end - rem
+                        };
+                        if batched.len() >= NUM_VERTICES_IN_TRIANGLE {
+                            gl.draw_arrays(
+                                glow::TRIANGLES,
+                                (batched.start - current_uploaded.start) as i32,
+                                batched.len() as i32,
+                            );
+                            verify!(gl);
                         }
+                        batched
                     }
 
-                    // Draw an image whose texture data lies within the `image_map` at the
-                    // given `id`.
-                    //
-                    // Only submit the vertices if there is enough for at least one triangle.
-                    Draw::Image(image_id, slice) => {
-                        if slice.len() >= NUM_VERTICES_IN_TRIANGLE {
-                            unsafe {
-                                if let Some(image) = image_map.get(&image_id) {
-                                    gl.bind_texture(glow::TEXTURE_2D, Some(image.texture));
-                                    verify!();
-                                } else {
-                                    gl.bind_texture(glow::TEXTURE_2D, None);
-                                    verify!();
-                                }
-                                let x = to_raw_bytes(slice);
-                                gl.buffer_data_u8_slice(glow::ARRAY_BUFFER, x, glow::DYNAMIC_DRAW);
+                    if range.len() < NUM_VERTICES_IN_TRIANGLE {
+                        continue;
+                    }
+                    match command {
+                        PreparedCommand::Plain(_) => {
+                            // Draw text and plain 2D geometry.
+                            gl.bind_texture(glow::TEXTURE_2D, Some(glyph_texture));
+                            verify!();
+                        }
+                        PreparedCommand::Image(image_id, _) => {
+                            // Draw an image whose texture data lies within the `image_map` at the
+                            // given `id`.
+                            if let Some(image) = image_map.get(&image_id) {
+                                gl.bind_texture(glow::TEXTURE_2D, Some(image.texture));
                                 verify!();
-                                gl.draw_arrays(glow::TRIANGLES, 0, slice.len() as i32);
+                            } else {
+                                gl.bind_texture(glow::TEXTURE_2D, None);
                                 verify!();
                             }
                         }
+                        _ => unreachable!(),
+                    }
+
+                    let drawn_range = draw_available_batch(gl, &current_uploaded, range.clone());
+                    let mut drawn_end = drawn_range.end;
+                    // We check to see if there are any vertices in the current
+                    // command which had not been drawn due to not being in the
+                    // current uploaded VBO. If there are some, we upload a new
+                    // batch of vertices and draw the remaining vertices in the
+                    // current command. This is repeated until all vertices in
+                    // the current command are drawn.
+                    while {
+                        let unbatched = drawn_end..range.end;
+                        unbatched.len() >= NUM_VERTICES_IN_TRIANGLE
+                    } {
+                        current_uploaded = upload_vbo(gl, &self.vertices, drawn_end);
+
+                        let drawn_range =
+                            draw_available_batch(gl, &current_uploaded, drawn_end..range.end);
+                        drawn_end = drawn_range.end;
                     }
                 },
             }
@@ -1071,29 +1118,12 @@ impl Renderer {
             verify!();
             gl.bind_buffer(glow::ARRAY_BUFFER, None);
             verify!();
-            gl.disable(glow::SCISSOR_TEST);
-            verify!();
+            if has_scissor {
+                gl.disable(glow::SCISSOR_TEST);
+                verify!();
+            }
         }
 
         Ok(())
-    }
-}
-
-impl<'a> Iterator for Commands<'a> {
-    type Item = Command<'a>;
-    fn next(&mut self) -> Option<Self::Item> {
-        let Commands {
-            ref mut commands,
-            ref vertices,
-        } = *self;
-        commands.next().map(|command| match *command {
-            PreparedCommand::Scizzor(scizzor) => Command::Scizzor(scizzor),
-            PreparedCommand::Plain(ref range) => {
-                Command::Draw(Draw::Plain(&vertices[range.clone()]))
-            }
-            PreparedCommand::Image(id, ref range) => {
-                Command::Draw(Draw::Image(id, &vertices[range.clone()]))
-            }
-        })
     }
 }
