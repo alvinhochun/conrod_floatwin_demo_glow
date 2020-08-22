@@ -140,6 +140,29 @@ pub fn wasm_start() {
         conrod_example_app: conrod_example_shared::DemoApp::new(rust_logo),
     };
 
+    macro_rules! verify {
+        () => {{
+            let err = gl.get_error();
+            if err != 0 {
+                panic!("gl error {}", err);
+            }
+        }};
+    }
+
+    unsafe {
+        gl.clear_color(0.0, 0.0, 0.0, 1.0);
+        verify!();
+        gl.enable(glow::BLEND);
+        verify!();
+        gl.blend_func_separate(
+            glow::SRC_ALPHA,
+            glow::ONE_MINUS_SRC_ALPHA,
+            glow::ONE,
+            glow::ONE_MINUS_SRC_ALPHA,
+        );
+        verify!();
+    }
+
     let mut should_update_ui = true;
     let mut needs_next_update = true;
     event_loop.run(move |event, _, control_flow| {
@@ -213,15 +236,6 @@ pub fn wasm_start() {
                     // Get the underlying winit window and update the mouse cursor as set by conrod.
                     winit_window.set_cursor_icon(convert_mouse_cursor(ui.mouse_cursor()));
 
-                    macro_rules! verify {
-                        () => {{
-                            let err = gl.get_error();
-                            if err != 0 {
-                                panic!("gl error {}", err);
-                            }
-                        }};
-                    }
-
                     // Draw the `Ui` if it has changed.
                     if let Some(primitives) = ui.draw_if_changed() {
                         let display = (
@@ -231,18 +245,7 @@ pub fn wasm_start() {
                         );
                         renderer.fill(&display, &gl, primitives, &image_map);
                         unsafe {
-                            gl.clear_color(0.0, 0.0, 0.0, 1.0);
-                            verify!();
                             gl.clear(glow::COLOR_BUFFER_BIT | glow::DEPTH_BUFFER_BIT);
-                            verify!();
-                            gl.enable(glow::BLEND);
-                            verify!();
-                            gl.blend_func_separate(
-                                glow::SRC_ALPHA,
-                                glow::ONE_MINUS_SRC_ALPHA,
-                                glow::ONE,
-                                glow::ONE_MINUS_SRC_ALPHA,
-                            );
                             verify!();
                             gl.viewport(
                                 0,
